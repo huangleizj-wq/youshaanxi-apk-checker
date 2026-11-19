@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>游陕西安装包校验</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f5f0; color: #182c2b; font-family: Roboto, system-ui, sans-serif; }
+    main { max-width: 640px; padding: 32px 20px 48px; margin: auto; }
+    h1 { font-size: 28px; line-height: 1.3; margin: 0 0 12px; }
+    p { line-height: 1.7; margin: 0 0 20px; color: #536462; }
+    .card { padding: 22px; border-radius: 20px; background: #fff; margin-top: 24px; }
+    button { width: 100%; min-height: 48px; border: 0; border-radius: 12px; padding: 12px 16px; font: inherit; font-weight: 600; color: #fff; background: #17665d; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    button:focus-visible, textarea:focus-visible { outline: 3px solid #83b7ad; outline-offset: 3px; }
+    #status { margin: 18px 0 0; font-weight: 500; color: #182c2b; overflow-wrap: anywhere; }
+    #status[data-state="match"] { color: #17665d; }
+    #status[data-state="mismatch"], #status[data-state="error"] { color: #a13b2e; }
+    #advice { margin-top: 18px; margin-bottom: 16px; }
+    textarea { display: block; width: 100%; min-height: 300px; margin: 0 0 16px; border: 1px solid #d4ded8; border-radius: 12px; padding: 14px; resize: vertical; background: #f9fbf8; color: #243c36; font: 13px/1.7 "IBM Plex Mono", monospace; overflow-wrap: anywhere; }
+    #copy-feedback { margin: 12px 0 0; font-size: 14px; }
+    .reference { margin: 16px 0 0; font-size: 13px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 360px) { main { padding: 24px 14px; } .card { padding: 18px; } h1 { font-size: 25px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>游陕西安装包校验</h1>
+    <p>选择手机里下载的 APK，生成结果后复制给我。检测在当前手机完成。</p>
+    <section class="card" aria-label="安装包检查">
+      <input id="apk-file" type="file" accept=".apk,application/vnd.android.package-archive,application/octet-stream" hidden>
+      <button id="choose-file" type="button">选择已下载的 APK</button>
+      <p class="reference" id="reference"></p>
+      <p id="status" role="status" aria-live="polite">等待选择文件。</p>
+      <noscript><p>请用支持 JavaScript 的浏览器打开此文件。</p></noscript>
+    </section>
+    <section id="result" class="card" aria-label="检测结果" hidden>
+      <p id="advice"></p>
+      <textarea id="report" readonly aria-label="可复制的检测报告" spellcheck="false"></textarea>
+      <button id="copy-report" type="button">复制检测结果</button>
+      <p id="copy-feedback" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+  <script>
+(function () {
+    "use strict";
+
+    const REFERENCE = Object.freeze({
+        version: "0.1.4",
+        size: 29968671,
+        sha256: "818c8be11feca39e2d79f85ff53bd75267e94de5c50891eef6e85fb7006d151b"
+    });
+    const INVALID_FILE = "文件结构不完整或格式不受支持。";
+    const SHA256_CONSTANTS = new Uint32Array([
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]);
+
+    function requireStructure(condition) {
+        if (!condition) {
+            throw new Error(INVALID_FILE);
+        }
+    }
+
+    function requireBytes(bytes) {
+        requireStructure(Object.prototype.toString.call(bytes) === "[object Uint8Array]");
+    }
+
+    function rotateRight(value, shift) {
+        return (value >>> shift) | (value << (32 - shift));
+    }
+
+    function compress(bytes, offset, state, words) {
+        for (let index = 0; index < 16; index++) {
+            const position = offset + index * 4;
+            words[index] = (bytes[position] << 24) | (bytes[position + 1] << 16)
+                | (bytes[position + 2] << 8) | bytes[position + 3];
+        }
+        for (let index = 16; index < 64; index++) {
+            const before = words[index - 15];
+            const recent = words[index - 2];
+            const smallZero = rotateRight(before, 7) ^ rotateRight(before, 18) ^ (before >>> 3);
+            const smallOne = rotateRight(recent, 17) ^ rotateRight(recent, 19) ^ (recent >>> 10);
+            words[index] = (words[index - 16] + smallZero + words[index - 7] + smallOne) >>> 0;
+        }
+        let a = state[0];
+        let b = state[1];
+        let c = state[2];
+        let d = state[3];
+        let e = state[4];
+        let f = state[5];
+        let g = state[6];
+        let h = state[7];
+        for (let index = 0; index < 64; index++) {
+            const largeOne = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+            const choice = (e & f) ^ (~e & g);
+            const first = (h + largeOne + choice + SHA256_CONSTANTS[index] + words[index]) >>> 0;
+            const largeZero = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+            const majority = (a & b) ^ (a & c) ^ (b & c);
+            const second = (largeZero + majority) >>> 0;
+            h = g;
+            g = f;
+            f = e;
+            e = (d + first) >>> 0;
+            d = c;
+            c = b;
+            b = a;
+            a = (first + second) >>> 0;
+        }
+        state[0] = (state[0] + a) >>> 0;
+        state[1] = (state[1] + b) >>> 0;
+        state[2] = (state[2] + c) >>> 0;
+        state[3] = (state[3] + d) >>> 0;
+        state[4] = (state[4] + e) >>> 0;
+        state[5] = (state[5] + f) >>> 0;
+        state[6] = (state[6] + g) >>> 0;
+        state[7] = (state[7] + h) >>> 0;
+    }
+
+    /** Synchronous fallback for offline file/content pages without usable Web Crypto. */
+    function sha256Fallback(bytes) {
+        requireBytes(bytes);
+        const state = new Uint32Array([
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+        ]);
+        const words = new Uint32Array(64);
+        const fullLength = bytes.length - bytes.length % 64;
+        for (let offset = 0; offset < fullLength; offset += 64) {
+            compress(bytes, offset, state, words);
+        }
+        const remaining = bytes.length - fullLength;
+        const tail = new Uint8Array(remaining < 56 ? 64 : 128);
+        tail.set(bytes.subarray(fullLength));
+        tail[remaining] = 0x80;
+        const tailView = new DataView(tail.buffer);
+        tailView.setUint32(tail.length - 8, Math.floor(bytes.length / 0x20000000), false);
+        tailView.setUint32(tail.length - 4, (bytes.length * 8) >>> 0, false);
+        for (let offset = 0; offset < tail.length; offset += 64) {
+            compress(tail, offset, state, words);
+        }
+        return Array.from(state, word => word.toString(16).padStart(8, "0")).join("");
+    }
+
+    async function sha256(bytes) {
+        requireBytes(bytes);
+        try {
+            const crypto = globalThis.crypto;
+            if (crypto && crypto.subtle) {
+                const digest = await crypto.subtle.digest("SHA-256", bytes);
+                return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+            }
+        } catch (ignored) {
+            // Local documents can expose Web Crypto while still denying digest operations.
+        }
+        return sha256Fallback(bytes);
+    }
+
+    function uint64(view, offset) {
+        const value = view.getUint32(offset, true) + view.getUint32(offset + 4, true) * 0x100000000;
+        requireStructure(Number.isSafeInteger(value));
+        return value;
+    }
+
+    function ascii(bytes, offset, length) {
+        let name = "";
+        for (let index = 0; index < length; index++) {
+            const byte = bytes[offset + index];
+            if (byte > 0x7f) {
+                return null;
+            }
+            name += String.fromCharCode(byte);
+        }
+        return name;
+    }
+
+    function signingBlock(bytes, view, centralOffset) {
+        const result = { start: centralOffset, v2Present: false, v3Present: false };
+        if (centralOffset < 24 || ascii(bytes, centralOffset - 16, 16) !== "APK Sig Block 42") {
+            return result;
+        }
+        const size = uint64(view, centralOffset - 24);
+        requireStructure(size >= 24 && size <= centralOffset - 8);
+        const start = centralOffset - size - 8;
+        requireStructure(uint64(view, start) === size);
+        const end = centralOffset - 24;
+        let position = start + 8;
+        while (position < end) {
+            requireStructure(position + 8 <= end);
+            const pairSize = uint64(view, position);
+            requireStructure(pairSize >= 4 && pairSize <= end - position - 8);
+            const id = view.getUint32(position + 8, true);
+            result.v2Present ||= id === 0x7109871a && pairSize > 4;
+            result.v3Present ||= id === 0xf05368c0 && pairSize > 4;
+            position += pairSize + 8;
+        }
+        requireStructure(position === end);
+        result.start = start;
+        return result;
+    }
+
+    function zipStructure(bytes) {
+        requireStructure(bytes.length >= 22);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let eocd = -1;
+        const minimum = Math.max(0, bytes.length - 22 - 65535);
+        for (let offset = bytes.length - 22; offset >= minimum; offset--) {
+            if (view.getUint32(offset, true) === 0x06054b50
+                    && offset + 22 + view.getUint16(offset + 20, true) === bytes.length) {
+                eocd = offset;
+                break;
+            }
+        }
+        requireStructure(eocd >= 0);
+        const count = view.getUint16(eocd + 10, true);
+        const centralSize = view.getUint32(eocd + 12, true);
+        const centralOffset = view.getUint32(eocd + 16, true);
+        requireStructure(view.getUint16(eocd + 4, true) === 0 && view.getUint16(eocd + 6, true) === 0
+                && view.getUint16(eocd + 8, true) === count && count !== 0xffff
+                && centralSize !== 0xffffffff && centralOffset !== 0xffffffff
+                && centralOffset <= eocd && centralSize === eocd - centralOffset);
+        const signing = signingBlock(bytes, view, centralOffset);
+        const names = new Set();
+        const sfNames = new Set();
+        const signatureNames = new Set();
+        let apkManifestPresent = false;
+        let jarManifestPresent = false;
+        let position = centralOffset;
+        for (let entry = 0; entry < count; entry++) {
+            requireStructure(position + 46 <= eocd && view.getUint32(position, true) === 0x02014b50);
+            const compressedSize = view.getUint32(position + 20, true);
+            const uncompressedSize = view.getUint32(position + 24, true);
+            const nameLength = view.getUint16(position + 28, true);
+            const extraLength = view.getUint16(position + 30, true);
+            const commentLength = view.getUint16(position + 32, true);
+            const localOffset = view.getUint32(position + 42, true);
+            const next = position + 46 + nameLength + extraLength + commentLength;
+            requireStructure(nameLength > 0 && next <= eocd && view.getUint16(position + 34, true) === 0
+                    && compressedSize !== 0xffffffff && uncompressedSize !== 0xffffffff
+                    && localOffset + 30 <= signing.start && view.getUint32(localOffset, true) === 0x04034b50);
+            const localNameLength = view.getUint16(localOffset + 26, true);
+            const localExtraLength = view.getUint16(localOffset + 28, true);
+            const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+            requireStructure(localNameLength === nameLength && dataStart <= signing.start
+                    && compressedSize <= signing.start - dataStart
+                    && view.getUint16(localOffset + 6, true) === view.getUint16(position + 8, true)
+                    && view.getUint16(localOffset + 8, true) === view.getUint16(position + 10, true));
+            for (let index = 0; index < nameLength; index++) {
+                requireStructure(bytes[localOffset + 30 + index] === bytes[position + 46 + index]);
+            }
+            const name = ascii(bytes, position + 46, nameLength);
+            if (name !== null) {
+                requireStructure(!names.has(name));
+                names.add(name);
+                apkManifestPresent ||= name === "AndroidManifest.xml";
+                jarManifestPresent ||= name === "META-INF/MANIFEST.MF";
+                const signature = /^META-INF\/([^/]+)\.(SF|RSA|DSA|EC)$/i.exec(name);
+                if (signature) {
+                    const signer = signature[1].toUpperCase();
+                    if (signature[2].toUpperCase() === "SF") {
+                        sfNames.add(signer);
+                    } else {
+                        signatureNames.add(signer);
+                    }
+                }
+            }
+            position = next;
+        }
+        requireStructure(position === eocd);
+        return {
+            zipStructureValid: true,
+            apkManifestPresent,
+            v1Present: jarManifestPresent && Array.from(sfNames).some(name => signatureNames.has(name)),
+            v2Present: signing.v2Present,
+            v3Present: signing.v3Present
+        };
+    }
+
+    /** Checks structure and artifact identity. Signature markers do not authenticate a signer. */
+    async function inspect(buffer) {
+        requireStructure(Object.prototype.toString.call(buffer) === "[object ArrayBuffer]");
+        try {
+            const bytes = new Uint8Array(buffer);
+            const structure = zipStructure(bytes);
+            const digest = await sha256(bytes);
+            return {
+                size: bytes.length,
+                sha256: digest,
+                ...structure,
+                matchesReference: bytes.length === REFERENCE.size && digest === REFERENCE.sha256
+            };
+        } catch (ignored) {
+            throw new Error(INVALID_FILE);
+        }
+    }
+
+    const api = Object.freeze({ REFERENCE, inspect, sha256, sha256Fallback });
+    if (typeof module !== "undefined" && module.exports) {
+        module.exports = api;
+    }
+    globalThis.ApkInspector = api;
+}());
+
+  </script>
+  <script>
+    "use strict";
+    const picker = document.getElementById("apk-file");
+    const choose = document.getElementById("choose-file");
+    const status = document.getElementById("status");
+    const result = document.getElementById("result");
+    const advice = document.getElementById("advice");
+    const report = document.getElementById("report");
+    const copy = document.getElementById("copy-report");
+    const feedback = document.getElementById("copy-feedback");
+    const reference = ApkInspector.REFERENCE;
+    let busy = false;
+
+    document.getElementById("reference").textContent =
+      "参考安装包 " + reference.version + " · " + reference.size.toLocaleString() + " 字节";
+    choose.addEventListener("click", () => picker.click());
+
+    function showStatus(message, state) {
+      status.textContent = message;
+      status.dataset.state = state;
+    }
+
+    function presence(value) {
+      return value ? "找到" : "未找到";
+    }
+
+    picker.addEventListener("change", async () => {
+      if (busy || !picker.files || !picker.files[0]) return;
+      const file = picker.files[0];
+      result.hidden = true;
+      feedback.textContent = "";
+      if (!file.name.toLowerCase().endsWith(".apk")) {
+        showStatus("请选择解压后的 .apk 文件。", "error");
+        picker.value = "";
+        return;
+      }
+      if (file.size === 0 || file.size > 128 * 1024 * 1024) {
+        showStatus("请选择完整下载、大小在 128 MiB 以内的 APK。", "error");
+        picker.value = "";
+        return;
+      }
+      busy = true;
+      choose.disabled = true;
+      choose.textContent = "正在校验…";
+      status.setAttribute("aria-busy", "true");
+      showStatus("正在读取文件并计算完整 SHA256，请稍候。", "busy");
+      try {
+        const checked = await ApkInspector.inspect(await file.arrayBuffer());
+        if (!checked.apkManifestPresent) {
+          showStatus("这份文件未识别为 Android 安装包。", "error");
+          advice.textContent = "请复制结果发给我，核对是否选择了正确的文件。";
+        } else if (checked.matchesReference) {
+          showStatus("文件与已验签的 " + reference.version + " 原包完全一致。", "match");
+          advice.textContent = "请复制结果发给我，继续定位这台手机的安装失败原因。";
+        } else {
+          showStatus("这份文件与参考 " + reference.version + " 原包不同。", "mismatch");
+          advice.textContent = "请复制结果发给我，核对下载版本和文件内容。";
+        }
+        report.value = [
+          "游陕西 APK 检测结果",
+          "大小 " + checked.size + " 字节",
+          "SHA256 " + checked.sha256,
+          "参考版本 " + reference.version,
+          "与参考包一致 " + (checked.matchesReference ? "是" : "否"),
+          "ZIP 目录结构 " + (checked.zipStructureValid ? "可读取" : "未通过"),
+          "AndroidManifest.xml " + presence(checked.apkManifestPresent),
+          "v1 签名数据 " + presence(checked.v1Present),
+          "v2 签名数据 " + presence(checked.v2Present),
+          "v3 签名数据 " + presence(checked.v3Present),
+          "签名数据检查仅表示存在性；参考包已在构建端完成验签。"
+        ].join("\n");
+        result.hidden = false;
+      } catch (error) {
+        showStatus("文件未通过检查，请复制下面的错误结果。", "error");
+        advice.textContent = "这次检查尚未确认文件是否与原包一致。";
+        report.value = [
+          "游陕西 APK 检测未完成",
+          "大小 " + file.size + " 字节",
+          "原因 " + (error instanceof Error ? error.message : "浏览器无法读取文件。")
+        ].join("\n");
+        result.hidden = false;
+      } finally {
+        busy = false;
+        choose.disabled = false;
+        choose.textContent = "重新选择 APK";
+        status.removeAttribute("aria-busy");
+        picker.value = "";
+      }
+    });
+
+    copy.addEventListener("click", async () => {
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("Clipboard unavailable");
+        await navigator.clipboard.writeText(report.value);
+        feedback.textContent = "已复制，可以粘贴到聊天。";
+      } catch {
+        report.focus();
+        report.select();
+        report.setSelectionRange(0, report.value.length);
+        let copied = false;
+        try {
+          copied = document.execCommand("copy");
+        } catch {
+          copied = false;
+        }
+        feedback.textContent = copied ? "已复制，可以粘贴到聊天。" : "请长按报告文字，选择全选并复制。";
+      }
+    });
+  </script>
+</body>
+</html>
